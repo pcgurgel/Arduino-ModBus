@@ -1,0 +1,164 @@
+/* UNIVERSIDADE FEDERAL DO RIO GRANDE DO NORTE
+ * DEPARTAMENTO DE ENGENHARIA DA COMPUTAÇÃO
+ * TRABALHO DE CONCLUSÃO DE CURSO
+ * PROTOCOLO ModBus + ARDUINO
+ * AUTHOR: PEDRO DE CASTRO GURGEL LIMA
+ */
+
+#include <SPI.h>
+#include <Stepper.h>
+#include <Ethernet.h>
+
+#include "DHT.h"
+#include "ModbusTCP.h"
+#include "Ultrasonic.h"
+
+/* Criar instância do Sensor Temperatura/Umidade */
+
+#define DHTPIN 34         //Pino de dados
+#define DHTTYPE DHT22     //Tipo de sensor  
+DHT dht(DHTPIN, DHTTYPE); //Init
+
+/* Criar instância do Ultrasonic */
+//Pino 22 envia pulso TRIG
+//Pino 23 recebe o pulso do ECHO
+Ultrasonic ultrasonic(22, 23);
+int distancia;
+
+/*Configurando motor de passo*/
+const int stepsPerRevolution = 200;
+//Passos de revolucao
+Stepper myStepper(stepsPerRevolution, 28, 30, 29, 31);
+
+/* Passo um do MBS: Criar instância */
+ModbusTCP Mb;
+//TABELA DE FUNÇÕES
+//1(read coils)
+//3(read registers)
+//5(write coils)
+//6(write registers)
+//Sinal Mb.R para INT(0 a 125)
+//Sinal Mb.C para BOOL (0 a 128)
+//Port 502 (definido na bilbioteca) MB_PORT
+
+void setup()
+{
+  /* Configuração Ethernet para Comunicação */
+  uint8_t mac[]     = { 0x90, 0xA2, 0xDA, 0x00, 0x51, 0x06 };
+  uint8_t ip[]      = { 192, 168, 25, 102 };
+  uint8_t gateway[] = { 192, 168, 25, 1 };
+  uint8_t subnet[]  = { 255, 255, 255, 0 };
+  Ethernet.begin(mac, ip, gateway, subnet);
+  // IMPORTANTE pinos reservados para uso do ethernet shield (4,10,11,12,13)
+
+  delay(5000);
+  Serial.begin(9600);
+  dht.begin();
+
+  /* Passo dois do MBS: configurar */
+  pinMode(22, OUTPUT); //TRIG_PIN
+  pinMode(23, INPUT);  //ECHO_PIN
+  pinMode(24, OUTPUT); //PIN_02 LED_A
+  pinMode(25, OUTPUT); //PIN_03 LED_B
+  pinMode(26, OUTPUT); //PIN_02 LED_C
+  pinMode(27, OUTPUT); //PIN_03 LED_D
+  pinMode(28, OUTPUT); //STEP 01
+  pinMode(29, OUTPUT); //STEP 02
+  pinMode(30, OUTPUT); //STEP 03
+  pinMode(31, OUTPUT); //STEP 04
+  pinMode(32, OUTPUT); //DTH22 SENSOR
+  pinMode(42, OUTPUT); //RELE IN01
+  pinMode(43, OUTPUT); //RELE IN02
+}
+
+void loop()
+{
+  /* Passo tres do MBS: update do loop */
+  Mb.Run(); // Inicializando o conjunto de registradores
+
+  //Associação de registradores as entradas/saídas físicas analógicas do Arduino
+
+  //Entradas Analógicas
+  Mb.R[0] = analogRead(A0); //PIN_A0 TO REG 0 TQ_001
+  Mb.R[1] = analogRead(A1); //PIN_A1 TO REG 1 TQ_002
+  Mb.R[2] = analogRead(A2); //PIN_A2 TO REG 2
+  Mb.R[3] = analogRead(A3); //PIN_A3 TO REG 3
+  Mb.R[4] = analogRead(A4); //PIN_A4 TO REG 4
+  Mb.R[5] = analogRead(A5); //PIN_A5 TO REG 5
+
+  //Saídas Analógicas
+  analogWrite(5, Mb.R[6]);  //PIN_05 TO REG 6
+  analogWrite(6, Mb.R[7]);  //PIN_06 TO REG 7
+
+  //Associação de registradores as entradas/saídas físicas digitais do Arduino
+
+  //Entradas Digitais
+  Mb.C[8] = digitalRead(22);  //PIN_22 TO REG 8 TRIG_PIN
+  Mb.C[9] = digitalRead(23);  //PIN_23 TO REG 9 ECHO_PIN
+  Mb.R[16] = digitalRead(2);  //PIN_02 TO REG 16 (IDLE) LEITURA DO ULTRASONIC
+  Mb.R[18] = digitalRead(50); //PIN_32 TO REG 18 (IDLE) DTH22 SENSOR UMIDADE
+  Mb.R[19] = digitalRead(51); //PIN_32 TO REG 19 (IDLE) DTH22 SENSOR TEMPERATURA
+
+  //Saídas Digitais
+  digitalWrite(24, Mb.C[10]); //PIN_24 TO REG 10 LED_A
+  digitalWrite(25, Mb.C[11]); //PIN_25 TO REG 11 LED_B
+  digitalWrite(26, Mb.C[12]); //PIN_26 TO REG 12 LED_C
+  digitalWrite(27, Mb.C[13]); //PIN_27 TO REG 13 LED_D
+  digitalWrite(52, Mb.C[14]); //PIN_52 (IDLE) ESCRITA DO MOTOR ABRIR
+  digitalWrite(53, Mb.C[15]); //PIN_53 (IDLE) ESCRITA DO MOTOR FECHAR
+  digitalWrite(42, Mb.C[16]); //PIN_32 TO REG 16 RELE IN01 LOW = LIGA/HIGH = DESLIGA
+  digitalWrite(43, Mb.C[17]); //PIN_33 TO REG 16 RELE IN02 LOW = LIGA/HIGH = DESLIGA
+
+  //---------------------------------------------------------------------
+  /*OPERACAO DO SENSOR ULTRASONICO*/
+  distancia = ultrasonic.Ranging(CM);
+  Mb.R[16] = distancia;
+//   Serial.print(Mb.R[16]);
+//   Serial.println(" cm");
+
+  //---------------------------------------------------------------------
+  /*OPERACAO DO MOTOR DE PASSO*/
+  int sensorReading;
+
+  //ABRIR PORTAO
+  if (Mb.C[14] == 1) {
+    sensorReading = 70; //rpm
+  } else {
+    if (Mb.C[14] == 0) {
+      sensorReading = 0;
+    }
+  }
+  // set the motor speed:
+  if (sensorReading > 0) {
+    myStepper.setSpeed(sensorReading);
+    myStepper.step(stepsPerRevolution); //HORARIO
+  } else {
+    myStepper.setSpeed(0);
+  }
+  //FECHAR PORTAO
+  if (Mb.C[15] == 1) {
+    sensorReading = 70; //rpm
+  } else {
+    if (Mb.C[15] == 0) {
+      sensorReading = 0;
+    }
+  }
+  // set the motor speed:
+  if (sensorReading > 0) {
+    myStepper.setSpeed(sensorReading);
+    myStepper.step(-stepsPerRevolution); //ANTI-HORARIO
+  } else {
+    myStepper.setSpeed(0);
+  }
+
+  //---------------------------------------------------------------------
+  /*OPERACAO DO DTH22*/
+  // A leitura de Temperatura e Umidade se dá em intervalos de 250 milliseconds!
+  Mb.R[18] = dht.readHumidity();    //UMIDADE
+  Mb.R[19] = dht.readTemperature(); //CELCIUS
+//    Serial.print(Mb.R[18]); //Temperatura
+//    Serial.print("\t");
+//    Serial.print(Mb.R[19]); //Umidade
+//    Serial.print("\n");
+}
+
